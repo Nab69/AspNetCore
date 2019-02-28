@@ -9,9 +9,7 @@ using System.Linq;
 using System.Threading;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.ActionConstraints;
-using Microsoft.AspNetCore.Mvc.Infrastructure;
 using Microsoft.AspNetCore.Routing;
-using Microsoft.Extensions.Internal;
 using Microsoft.Extensions.Logging;
 using Resources = Microsoft.AspNetCore.Mvc.Core.Resources;
 
@@ -287,95 +285,17 @@ namespace Microsoft.AspNetCore.Mvc.Infrastructure
             }
         }
 
-        // The action selector cache stores a mapping of route-values -> action descriptors for each known set of
-        // of route-values. We actually build two of these mappings, one for case-sensitive (fast path) and one for
-        // case-insensitive (slow path).
-        //
-        // This is necessary because MVC routing/action-selection is always case-insensitive. So we're going to build
-        // a case-sensitive dictionary that will behave like the a case-insensitive dictionary when you hit one of the
-        // canonical entries. When you don't hit a case-sensitive match it will try the case-insensitive dictionary
-        // so you still get correct behaviors.
-        //
-        // The difference here is because while MVC is case-insensitive, doing a case-sensitive comparison is much
-        // faster. We also expect that most of the URLs we process are canonically-cased because they were generated
-        // by Url.Action or another routing api.
-        //
-        // This means that for a set of actions like:
-        //      { controller = "Home", action = "Index" } -> HomeController::Index1()
-        //      { controller = "Home", action = "index" } -> HomeController::Index2()
-        //
-        // Both of these actions match "Index" case-insensitively, but there exist two known canonical casings,
-        // so we will create an entry for "Index" and an entry for "index". Both of these entries match **both**
-        // actions.
+
         private class Cache
         {
             public Cache(ActionDescriptorCollection actions)
             {
-                // We need to store the version so the cache can be invalidated if the actions change.
-                Version = actions.Version;
+                var table = ActionSelectionTable<ActionDescriptor>.Create(actions);
 
-                // We need to build two maps for all of the route values.
-                OrdinalEntries = new Dictionary<string[], List<ActionDescriptor>>(StringArrayComparer.Ordinal);
-                OrdinalIgnoreCaseEntries = new Dictionary<string[], List<ActionDescriptor>>(StringArrayComparer.OrdinalIgnoreCase);
-
-                // We need to first identify of the keys that action selection will look at (in route data).
-                // We want to only consider conventionally routed actions here.
-                var routeKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for (var i = 0; i < actions.Items.Count; i++)
-                {
-                    var action = actions.Items[i];
-                    if (action.AttributeRouteInfo == null)
-                    {
-                        // This is a conventionally routed action - so make sure we include its keys in the set of
-                        // known route value keys.
-                        foreach (var kvp in action.RouteValues)
-                        {
-                            routeKeys.Add(kvp.Key);
-                        }
-                    }
-                }
-
-                // We need to hold on to an ordered set of keys for the route values. We'll use these later to
-                // extract the set of route values from an incoming request to compare against our maps of known
-                // route values.
-                RouteKeys = routeKeys.ToArray();
-
-                for (var i = 0; i < actions.Items.Count; i++)
-                {
-                    var action = actions.Items[i];
-                    if (action.AttributeRouteInfo != null)
-                    {
-                        // This only handles conventional routing. Ignore attribute routed actions.
-                        continue;
-                    }
-
-                    // This is a conventionally routed action - so we need to extract the route values associated
-                    // with this action (in order) so we can store them in our dictionaries.
-                    var routeValues = new string[RouteKeys.Length];
-                    for (var j = 0; j < RouteKeys.Length; j++)
-                    {
-                        action.RouteValues.TryGetValue(RouteKeys[j], out routeValues[j]);
-                    }
-
-                    if (!OrdinalIgnoreCaseEntries.TryGetValue(routeValues, out var entries))
-                    {
-                        entries = new List<ActionDescriptor>();
-                        OrdinalIgnoreCaseEntries.Add(routeValues, entries);
-                    }
-
-                    entries.Add(action);
-
-                    // We also want to add the same (as in reference equality) list of actions to the ordinal entries.
-                    // We'll keep updating `entries` to include all of the actions in the same equivalence class -
-                    // meaning, all conventionally routed actions for which the route values are equal ignoring case.
-                    //
-                    // `entries` will appear in `OrdinalIgnoreCaseEntries` exactly once and in `OrdinalEntries` once
-                    // for each variation of casing that we've seen.
-                    if (!OrdinalEntries.ContainsKey(routeValues))
-                    {
-                        OrdinalEntries.Add(routeValues, entries);
-                    }
-                }
+                Version = table.Version;
+                RouteKeys = table.RouteKeys;
+                OrdinalEntries = table.OrdinalEntries;
+                OrdinalIgnoreCaseEntries = table.OrdinalIgnoreCaseEntries;
             }
 
             public int Version { get; }
@@ -385,76 +305,6 @@ namespace Microsoft.AspNetCore.Mvc.Infrastructure
             public Dictionary<string[], List<ActionDescriptor>> OrdinalEntries { get; }
 
             public Dictionary<string[], List<ActionDescriptor>> OrdinalIgnoreCaseEntries { get; }
-        }
-
-        private class StringArrayComparer : IEqualityComparer<string[]>
-        {
-            public static readonly StringArrayComparer Ordinal = new StringArrayComparer(StringComparer.Ordinal);
-
-            public static readonly StringArrayComparer OrdinalIgnoreCase = new StringArrayComparer(StringComparer.OrdinalIgnoreCase);
-
-            private readonly StringComparer _valueComparer;
-
-            private StringArrayComparer(StringComparer valueComparer)
-            {
-                _valueComparer = valueComparer;
-            }
-
-            public bool Equals(string[] x, string[] y)
-            {
-                if (object.ReferenceEquals(x, y))
-                {
-                    return true;
-                }
-
-                if (x == null ^ y == null)
-                {
-                    return false;
-                }
-
-                if (x.Length != y.Length)
-                {
-                    return false;
-                }
-
-                for (var i = 0; i < x.Length; i++)
-                {
-                    if (string.IsNullOrEmpty(x[i]) && string.IsNullOrEmpty(y[i]))
-                    {
-                        continue;
-                    }
-
-                    if (!_valueComparer.Equals(x[i], y[i]))
-                    {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-
-            public int GetHashCode(string[] obj)
-            {
-                if (obj == null)
-                {
-                    return 0;
-                }
-
-                var hash = new HashCodeCombiner();
-                for (var i = 0; i < obj.Length; i++)
-                {
-                    var o = obj[i];
-
-                    // Route values define null and "" to be equivalent.
-                    if (string.IsNullOrEmpty(o))
-                    {
-                        o = null;
-                    }
-                    hash.Add(o, _valueComparer);
-                }
-
-                return hash.CombinedHash;
-            }
         }
     }
 }
