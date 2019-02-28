@@ -85,6 +85,8 @@ namespace Microsoft.Extensions.DependencyInjection
 
             // Routing
             services.TryAddEnumerable(ServiceDescriptor.Singleton<MatcherPolicy, PageLoaderMatcherPolicy>());
+            services.TryAddEnumerable(ServiceDescriptor.Singleton<MatcherPolicy, DynamicPageEndpointMatcherPolicy>());
+            services.TryAddSingleton<DynamicPageEndpointSelector>();
 
             // Action description and invocation
             services.TryAddEnumerable(
